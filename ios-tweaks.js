@@ -5,17 +5,22 @@
      * iOS Tweaks for Lampa
      * 1. Закрывает плеер и освобождает медиа, когда Lampa уходит в фон,
      *    чтобы iOS не держал виджет «Сейчас играет» на экране блокировки.
-     * 2. Поворачивает встроенный плеер горизонтально, когда телефон держат вертикально.
+     * 2. Добавляет во встроенный плеер кнопку системного полноэкранного режима iOS.
      */
-    var VERSION = '1.1.0';
+    var VERSION = '1.2.0';
     var LOG = '[iOS-Tweaks]';
     var DEBUG_KEY = 'ios_tweaks_debug';
-    var LANDSCAPE_KEY = 'ios_tweaks_landscape';
-    var ROTATED_CLASS = 'ios-tweaks-landscape';
-    var BUTTON_CLASS = 'player-panel__ios-rotate';
+    var BUTTON_CLASS = 'player-panel__ios-fullscreen';
     var MEDIA_ACTIONS = ['play', 'pause', 'stop', 'seekbackward', 'seekforward', 'seekto', 'previoustrack', 'nexttrack'];
-    var ROTATE_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
-        + '<rect x="2" y="7" width="20" height="10" rx="2"/><path d="M12 3a9 9 0 0 1 8 5"/><path d="M20 3v5h-5"/></svg>';
+    // Вход в системный полный экран может на мгновение скрыть страницу: в это время не закрываем плеер.
+    var FULLSCREEN_GRACE_MS = 2000;
+    var FULLSCREEN_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
+        + '<path d="M4 9V4h5"/><path d="M20 9V4h-5"/><path d="M4 15v5h5"/><path d="M20 15v5h-5"/></svg>';
+
+    var fullscreen = {
+        enteredAt: 0,
+        ours: false
+    };
 
     function debug() {
         try {
@@ -114,6 +119,7 @@
     function onBackground(event) {
         if (event && event.type === 'visibilitychange' && document.visibilityState !== 'hidden') return;
         if (!playerOpened() || inPictureInPicture()) return;
+        if (Date.now() - fullscreen.enteredAt < FULLSCREEN_GRACE_MS) return;
 
         log('background', event && event.type);
 
@@ -137,95 +143,35 @@
         window.addEventListener('pagehide', handler);
     }
 
-    /* ---------- Горизонтальный режим ---------- */
+    /* ---------- Кнопка полноэкранного режима ---------- */
 
-    // Страница повёрнута на 90° по часовой: координата X в повёрнутом виде равна clientY.
-    var landscape = {
-        playerActive: false,
-        rotated: false,
-        drag: null,
-        offTimer: null
-    };
+    function enterFullscreen() {
+        var video = videoEl();
+        if (!video || typeof video.webkitEnterFullscreen !== 'function') return;
 
-    function landscapeEnabled() {
+        fullscreen.enteredAt = Date.now();
+        fullscreen.ours = true;
+
         try {
-            var v = Lampa.Storage.get(LANDSCAPE_KEY, true);
-            return v === true || v === 'true';
+            video.webkitEnterFullscreen();
+            log('fullscreen enter');
         } catch (e) {
-            return true;
+            fullscreen.ours = false;
+            log('fullscreen failed', e && e.message);
+            try {
+                if (Lampa.Noty && Lampa.Noty.show) Lampa.Noty.show('Полноэкранный режим недоступен, подождите загрузки видео');
+            } catch (e2) {}
         }
     }
 
-    function setLandscapeEnabled(value) {
-        try { Lampa.Storage.set(LANDSCAPE_KEY, value); } catch (e) {}
-    }
+    // Lampa закрывает плеер по webkitendfullscreen: после выхода из нашего полного экрана продолжаем во встроенном.
+    function onFullscreenEnd(e) {
+        if (!fullscreen.ours) return;
+        if (!e.target || e.target.tagName !== 'VIDEO') return;
 
-    function portrait() {
-        return window.innerHeight > window.innerWidth;
-    }
-
-    function isNativeIosPlayer() {
-        var player = document.querySelector('.player');
-        return !!(player && player.classList.contains('player--ios'));
-    }
-
-    function injectStyle() {
-        if (document.getElementById('ios-tweaks-style')) return;
-
-        var style = document.createElement('style');
-        style.id = 'ios-tweaks-style';
-        style.textContent = [
-            'html.' + ROTATED_CLASS + ', html.' + ROTATED_CLASS + ' body { overflow: hidden !important; }',
-            'body.' + ROTATED_CLASS + ' {',
-            '  position: fixed !important; top: 0 !important; left: 0 !important; margin: 0 !important;',
-            '  width: var(--ios-tweaks-h) !important; height: var(--ios-tweaks-w) !important;',
-            '  transform-origin: top left !important;',
-            '  transform: translateX(var(--ios-tweaks-w)) rotate(90deg) !important;',
-            '}',
-            'body.' + ROTATED_CLASS + ' .player-video video { width: 100% !important; height: 100% !important; }',
-            '.' + BUTTON_CLASS + ' svg { width: 1.6em; height: 1.6em; }'
-        ].join('\n');
-
-        document.head.appendChild(style);
-    }
-
-    function updateSize() {
-        var root = document.documentElement.style;
-        root.setProperty('--ios-tweaks-w', window.innerWidth + 'px');
-        root.setProperty('--ios-tweaks-h', window.innerHeight + 'px');
-    }
-
-    function updateButton() {
-        var button = document.querySelector('.' + BUTTON_CLASS);
-        if (!button) return;
-
-        button.style.display = portrait() ? '' : 'none';
-        button.classList.toggle('active', landscape.rotated);
-    }
-
-    function applyRotation() {
-        var need = landscape.playerActive && landscapeEnabled() && portrait() && !isNativeIosPlayer();
-
-        if (need) updateSize();
-
-        if (need !== landscape.rotated) {
-            landscape.rotated = need;
-            landscape.drag = null;
-
-            document.documentElement.classList.toggle(ROTATED_CLASS, need);
-            document.body.classList.toggle(ROTATED_CLASS, need);
-
-            // Lampa пересчитывает размер видео по resize.
-            window.dispatchEvent(new Event('resize'));
-            log('landscape', need);
-        }
-
-        updateButton();
-    }
-
-    function toggleLandscape() {
-        setLandscapeEnabled(!landscapeEnabled());
-        applyRotation();
+        fullscreen.ours = false;
+        e.stopImmediatePropagation();
+        log('fullscreen exit');
     }
 
     function ensureButton() {
@@ -236,150 +182,34 @@
 
         var button = document.createElement('div');
         button.className = BUTTON_CLASS + ' button selector';
-        button.innerHTML = ROTATE_ICON;
+        button.innerHTML = FULLSCREEN_ICON;
         button.addEventListener('click', safe(function (e) {
             e.preventDefault();
             e.stopPropagation();
-            toggleLandscape();
+            enterFullscreen();
         }));
 
         panel.insertBefore(button, panel.firstChild);
     }
 
-    function clamp(value, min, max) {
-        return Math.max(min, Math.min(max, value));
+    function injectStyle() {
+        if (document.getElementById('ios-tweaks-style')) return;
+
+        var style = document.createElement('style');
+        style.id = 'ios-tweaks-style';
+        style.textContent = '.' + BUTTON_CLASS + ' svg { width: 1.6em; height: 1.6em; }';
+        document.head.appendChild(style);
     }
 
-    function formatTime(seconds) {
-        seconds = Math.max(0, Math.floor(seconds));
-        var h = Math.floor(seconds / 3600);
-        var m = Math.floor((seconds % 3600) / 60);
-        var s = seconds % 60;
-        var mm = (h && m < 10 ? '0' : '') + m;
-        return (h ? h + ':' : '') + mm + ':' + (s < 10 ? '0' : '') + s;
-    }
-
-    // Lampa делит экран на трети по clientX и window.innerWidth: передаём ей координаты повёрнутого вида.
-    function onCaptureClick(e) {
-        if (!landscape.rotated || !e.isTrusted) return;
-
-        var target = e.target;
-        if (!target || !target.closest || !target.closest('.player-video')) return;
-
-        e.stopImmediatePropagation();
-        e.preventDefault();
-
-        var w = window.innerWidth;
-        var h = window.innerHeight;
-        var x = e.clientY / h * w;
-        var y = (w - e.clientX) / w * h;
-
-        target.dispatchEvent(new MouseEvent('click', {
-            bubbles: true,
-            cancelable: true,
-            view: window,
-            clientX: x,
-            clientY: y,
-            screenX: x,
-            screenY: y
-        }));
-    }
-
-    // Перемотка свайпом по полосе: Lampa считает сдвиг по clientX, а в повёрнутом виде палец двигается по clientY.
-    function onTouchStart(e) {
-        if (!landscape.rotated || !e.target || !e.target.closest) return;
-        if (!e.target.closest('.player-panel__time-touch-zone')) return;
-
-        var video = videoEl();
-        var timeline = document.querySelector('.player-panel__timeline');
-        if (!video || !timeline || !(video.duration > 0)) return;
-
-        e.stopImmediatePropagation();
-
-        var point = e.touches[0] || e.changedTouches[0];
-        var start = video.currentTime / video.duration;
-
-        landscape.drag = {
-            from: point.clientY,
-            width: timeline.offsetWidth || 1,
-            start: start,
-            to: start,
-            duration: video.duration
-        };
-    }
-
-    function onTouchMove(e) {
-        var drag = landscape.drag;
-        if (!drag) return;
-
-        e.stopImmediatePropagation();
-
-        var point = e.touches[0] || e.changedTouches[0];
-        drag.to = clamp(drag.start + (point.clientY - drag.from) / drag.width, 0, 1);
-
-        var video = videoEl();
-        if (video) video.rewind = true;
-
-        var position = document.querySelector('.player-panel__position');
-        if (position) position.style.width = (drag.to * 100) + '%';
-
-        var timenow = document.querySelector('.player-panel__timenow');
-        if (timenow) timenow.textContent = formatTime(drag.to * drag.duration);
-    }
-
-    function onTouchEnd(e) {
-        var drag = landscape.drag;
-        if (!drag) return;
-
-        e.stopImmediatePropagation();
-        landscape.drag = null;
-
-        var video = videoEl();
-        if (video) video.rewind = false;
-        if (e.type === 'touchcancel') return;
-
-        var seconds = drag.to * drag.duration;
-
-        if (Lampa.PlayerVideo && typeof Lampa.PlayerVideo.to === 'function') Lampa.PlayerVideo.to(seconds);
-        else if (video) video.currentTime = seconds;
-    }
-
-    function onPlayerStart() {
-        clearTimeout(landscape.offTimer);
-        landscape.playerActive = true;
-
-        setTimeout(safe(function () {
-            ensureButton();
-            applyRotation();
-        }), 0);
-    }
-
-    function onPlayerDestroy() {
-        landscape.playerActive = false;
-
-        // При переключении серии плеер пересоздаётся: не выпрямляем экран между сериями.
-        clearTimeout(landscape.offTimer);
-        landscape.offTimer = setTimeout(safe(function () {
-            if (!landscape.playerActive) applyRotation();
-        }), 300);
-    }
-
-    function initLandscape() {
+    function initFullscreenButton() {
         injectStyle();
 
-        Lampa.Player.listener.follow('start', safe(onPlayerStart));
-        Lampa.Player.listener.follow('destroy', safe(onPlayerDestroy));
+        Lampa.Player.listener.follow('start', safe(function () {
+            fullscreen.ours = false;
+            setTimeout(safe(ensureButton), 0);
+        }));
 
-        var resize = safe(applyRotation);
-        window.addEventListener('resize', resize);
-        window.addEventListener('orientationchange', resize);
-
-        var capture = { capture: true, passive: true };
-        document.addEventListener('click', safe(onCaptureClick), true);
-        document.addEventListener('touchstart', safe(onTouchStart), capture);
-        document.addEventListener('touchmove', safe(onTouchMove), capture);
-        document.addEventListener('touchend', safe(onTouchEnd), capture);
-        document.addEventListener('touchcancel', safe(onTouchEnd), capture);
+        document.addEventListener('webkitendfullscreen', safe(onFullscreenEnd), true);
     }
 
     function bind() {
@@ -389,7 +219,7 @@
         }
 
         initMediaCleanup();
-        initLandscape();
+        initFullscreenButton();
 
         try {
             console.log(LOG, 'v' + VERSION);
